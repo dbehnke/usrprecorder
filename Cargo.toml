@@ -1,5 +1,5 @@
 [package]
-name = "usrp_recorder"
+name = "usrprecorder"
 version = "0.1.0"
 edition = "2021"
 
