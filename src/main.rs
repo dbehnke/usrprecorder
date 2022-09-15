@@ -1,3 +1,5 @@
+mod usrp;
 fn main() {
-    println!("Hello, world!");
+    let c = usrp::Config::load_from_file("./usrprecorder.toml").unwrap();
+    usrp::rx_loop(&c)
 }
