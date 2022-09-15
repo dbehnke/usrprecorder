@@ -1,22 +1,29 @@
+use chrono::{ DateTime, Utc };
 use byteorder::{ BigEndian, LittleEndian, ReadBytesExt };
 use log::{ info, warn };
+use std::path::Path;
 use serde_derive::Deserialize;
 use std::fs::File;
+use std::io::prelude::*;
 use std::io::Cursor;
-use std::io::{ prelude::* };
 use std::net::UdpSocket;
 use std::str;
 use toml;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Config {
     group: String,
     rx_host_port: String,
+    audio_write_path: String,
 }
 
 impl Config {
-    pub fn _new(group: &str, rx_host_port: &str) -> Config {
-        Config { group: String::from(group), rx_host_port: String::from(rx_host_port) }
+    pub fn _new(group: &str, rx_host_port: &str, audio_write_path: &str) -> Config {
+        Config {
+            group: String::from(group),
+            rx_host_port: String::from(rx_host_port),
+            audio_write_path: String::from(audio_write_path),
+        }
     }
 
     pub fn load_from_file(filepath: &str) -> Result<Config, Box<dyn std::error::Error>> {
@@ -30,48 +37,53 @@ impl Config {
 
 struct Transmission {
     group: String, // name of a group this transmission belongs to
-    //StartTime time.Time    // start of Transmission
-    //EndTime   time.Time    // end of Transmission
-    Callsign: String, // who's transmitting
-    Audio: Vec<u8>, // raw audio payload
+    start_time: DateTime<Utc>, //StartTime time.Time    // start of Transmission
+    end_time: DateTime<Utc>, //EndTime   time.Time    // end of Transmission
+    callsign: String, // who's transmitting
+    audio: Vec<u8>, // raw audio payload
+    config: Config,
 }
 
-/*
-func NewTransmission(group, callsign string) Transmission {
-	log.Printf("BEGIN TX - %s - %s", group, callsign)
-	return Transmission{
-		Group:     group,
-		Callsign:  callsign,
-		StartTime: time.Now(),
-	}
-}
+impl Transmission {
+    pub fn new(group: String, callsign: String, config: &Config) -> Transmission {
+        Transmission {
+            group: group,
+            start_time: Utc::now(),
+            end_time: Utc::now(),
+            callsign: callsign,
+            audio: vec![],
+            config: config.to_owned(),
+        }
+    }
 
-func (t *Transmission) WriteAudioToFile(OutputPath string) (int64, error) {
-	timestampID := time.Now().UTC().Unix()
-	filename := fmt.Sprintf("%s-%d-%s.pcm", t.Group, timestampID, t.Callsign)
-	err := os.WriteFile(OutputPath+string(os.PathSeparator)+filename, t.Audio.Bytes(), 0600)
-	if err != nil {
-		return timestampID, err
-	}
-	return timestampID, nil
-}
+    fn write_transmission(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let timestamp = Utc::now().timestamp();
+        let filename = String::from(
+            format!("{}-{}-{}.pcm", self.config.group, timestamp, self.callsign)
+        );
+        let p = Path::new(&self.config.audio_write_path).join(filename);
+        let mut output = File::create(&p)?;
+        output.write_all(&self.audio)?;
+        info!("wrote {:?} ({} bytes)", &p, self.audio.len());
+        Ok(true)
+    }
 
-func (t *Transmission) EndTransmission() {
-	t.EndTime = time.Now()
-	timeElapsed := t.EndTime.Sub(t.StartTime)
-	log.Printf("END TX - %s - %s - %v - %d bytes", t.Group, t.Callsign, timeElapsed, t.Audio.Len())
-	if timeElapsed.Seconds() < 5 || timeElapsed.Seconds() > 200 {
-		log.Println("Not writing to disk .. elapsed time is too short or too long")
-		return
-	}
-	id, err := t.WriteAudioToFile("./audio")
-	if err != nil {
-		log.Printf("didn't write audio: %v", err)
-		return
-	}
-	log.Printf("Wrote %d to disk", id)
+    pub fn end_transmission(&mut self) {
+        self.end_time = Utc::now();
+        let elapsed = self.end_time.signed_duration_since(self.start_time);
+        info!(
+            "END TX: {} {} lasted {} seconds and used {} bytes",
+            self.group,
+            self.callsign,
+            elapsed.num_seconds(),
+            self.audio.len()
+        );
+        match self.write_transmission() {
+            Ok(_ok) => (),
+            Err(e) => { warn!("unable to write tranmission to disk: {}", e) }
+        }
+    }
 }
-*/
 
 // USRP Packet Types
 const USRP_TYPE_VOICE: u32 = 0;
@@ -85,11 +97,21 @@ const _USRP_TYPE_VOICE_ULAW: u32 = 6;
 // TLV
 const TLV_TAG_SET_INFO: u8 = 8;
 
+fn find_call(b: &[u8]) -> String {
+    match str::from_utf8(&b) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            return String::from("UNKNOWN");
+        }
+    }
+}
+
 pub fn rx_loop(c: &Config) -> Result<bool, Box<dyn std::error::Error>> {
     info!("Loaded Config for {}", c.group);
     info!("Opening receive UDP on {}", c.rx_host_port);
     let socket = UdpSocket::bind(&c.rx_host_port)?;
     let mut buf = [0; 1024];
+    let mut t = Transmission::new(String::from(&c.group), String::from("UNKNOWN"), c);
     loop {
         let (number_of_bytes, _src_addr) = socket.recv_from(&mut buf)?;
 
@@ -113,15 +135,16 @@ pub fn rx_loop(c: &Config) -> Result<bool, Box<dyn std::error::Error>> {
         match usrp_type {
             USRP_TYPE_VOICE => {
                 if keyup == 0 {
-                    info!("END TX");
+                    t.end_transmission();
                 } else {
-                    //capture the audio
+                    t.audio.extend(audio.iter()); //capture the audio
                 }
             }
             USRP_TYPE_TEXT => {
                 if audio[0] == TLV_TAG_SET_INFO {
                     info!("Info TAG, BEGIN TX");
-                    //callsign = findCall(audio[14:50])
+                    let callsign = find_call(&audio[14..50]);
+                    t = Transmission::new(String::from(&c.group), String::from(callsign), c);
                 }
             }
             USRP_TYPE_PING => {}

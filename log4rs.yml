@@ -1,0 +1,26 @@
+refresh_rate: 30 seconds
+
+appenders:
+  stdout:
+    kind: console
+
+  usrprecorder:
+    kind: file
+    path: "./usrprecorder.log"
+    encoder:
+      pattern: "{d} - {m}{n}"
+
+root:
+  level: info
+  appenders:
+    - stdout
+
+loggers:
+  app::backend::db:
+    level: info
+
+  app::usrprecorder:
+    level: info
+    appenders:
+      - usrprecorder
+    additive: false

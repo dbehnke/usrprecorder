@@ -1,2 +1,3 @@
-name = "testing"
+group = "testing"
 rx_host_port = "127.0.0.1:57771"
+audio_write_path = "./audio"
